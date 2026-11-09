@@ -3,3 +3,6 @@
 *.s
 *.out
 core
+
+/labs/*/*
+!/labs/*/*.c
