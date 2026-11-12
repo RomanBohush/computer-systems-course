@@ -1,0 +1,12 @@
+#include <stdio.h>
+#include <unistd.h>
+
+int main(void)
+{
+    fork();
+    fork();
+
+    printf("PID=%d\n", getpid());
+
+    return 0;
+}

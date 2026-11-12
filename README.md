@@ -9,7 +9,8 @@
 - Lab 1: [Представлення даних у пам'яті комп'ютера](#lab-1) (`labs/lab01-data-representation`)
 - Lab 2: [Від C до Assembly та машинного коду](#lab-2) (`labs/lab02-assembly`)
 - Lab 3: [Побудова програми, ELF та організація пам'яті](#lab-3) (`labs/lab03-build-elf-memory`)
-- Lab 4: Процеси, системні виклики та fork/exec/wait (`labs/lab04-processes`), буде додано
+- Lab 4: [Процеси: fork, exec, wait](#lab-4) (`labs/lab04-processes`)
+- Lab 4: [Процеси, системні виклики та fork/exec/wait](#lab-4) (`labs/lab04-processes`)
 - Lab 5: Потоки, race conditions та mutex (`labs/lab05-threads`), буде додано
 - Lab 6: Віртуальна пам'ять, file descriptors та I/O (`labs/lab06-memory-io`), буде додано
 - Lab 7: Pipes, redirection, signals та mini-shell (`labs/lab07-ipc-shell`), буде додано
@@ -663,3 +664,242 @@ memory_map:   ELF 64-bit LSB pie executable, x86-64, dynamically linked, interpr
 ### Висновок
 
 Я пройшов увесь шлях `.c` → `.i` → `.s` → `.o` → ELF executable. Кожен етап дає окремий тип файлу, а зовнішні символи й бібліотеки підключає лише лінкер. У ELF код лежить у `.text`, константи в `.rodata`, ініціалізовані дані в `.data`, неініціалізовані в `.bss`, який майже не збільшує розмір файлу. Експерименти з адресами показали поділ процесу на код, дані, купу й стек та дію ASLR. Мій прогноз про напрямок росту стека не підтвердився: у моєму середовищі (x86-64) стек росте до менших адрес.
+
+
+---
+
+## Lab 4
+
+**Процеси: fork, exec, wait.** Код: `labs/lab04-processes/`. Середовище: Codespaces, Ubuntu 24.04, GCC 13.3, x86-64. Прогнози до запуску експериментів цієї лаби не фіксувались, тому нижче наведено лише результати та пояснення.
+
+### 1. Program і process (process_info.c)
+
+`file process_info`: `ELF 64-bit LSB pie executable, x86-64`. Executable це файл на диску, process це запущена програма в пам'яті. PID це номер процесу в ОС, тому він не властивість файлу: виникає при запуску. PPID це PID батьківського процесу; для запущених програм це мій shell (PID 9811).
+
+### 2. Один executable, три процеси
+
+| Instance | PID | PPID |
+|---|---|---|
+| Process 1 | 20136 | 9811 |
+| Process 2 | 20147 | 9811 |
+| Process 3 | 20158 | 9811 |
+
+Program це файл з кодом, process це його запущений екземпляр зі своїм PID і станом. З одного файлу можна запустити багато процесів.
+
+### 3. Спостереження через /proc
+
+| Інформація | Результат |
+|---|---|
+| Process name | `process_info` |
+| PID | 20158 |
+| PPID | 9811 |
+| State | `S (sleeping)` |
+| Executable | `/workspaces/computer-systems-course/labs/lab04-processes/process_info` |
+
+`/proc/PID` це не сам процес, а інтерфейс ядра для перегляду його стану. Після `kill` каталог зник (`No such file or directory`). `/proc` корисний, бо робить внутрішній стан процесу видимим. У `maps` видно області процесу: сегменти `process_info`, `[heap]`, `libc.so.6`.
+
+### 4. System call write (strace)
+
+```
+write(1, "Hello from process!\n", 20) = 20
+```
+
+Аргументи: `1` це stdout, далі буфер і кількість байтів; повернено 20 записаних байтів. Шлях: `printf()` → бібліотека C → `write` → ядро → stdout.
+
+### 5. printf і write (output.c)
+
+```
+write(1, "Output using printf\n", 20) = 20
+write(1, "Output using write\n", 19)  = 19
+```
+
+Два `write`. `printf` це бібліотечна функція, яка форматує текст, буферизує його й зрештою викликає `write`. `write` це безпосередній виклик ядра. Один `printf` не завжди дорівнює одному `write`, бо є буферизація.
+
+### 6. fork (fork_basic.c)
+
+```
+Before fork: PID=21146
+PARENT: PID=21146, child PID=21147, fork returned=21147
+CHILD:  PID=21147, PPID=1, fork returned=0
+```
+
+Parent PID = 21146, child PID = 21147. До `fork()` був 1 процес, після успішного 2. Parent отримав PID дитини (>0), child отримав 0. Один рядок `pid_t pid = fork();` виконують обидва процеси, кожен продовжує з місця після виклику зі своїм значенням. У child `PPID=1`: parent завершився раніше, і дитину усиновив процес 1. У `strace` системний виклик називається `clone`, а не `fork`: API та інтерфейс ядра можуть мати різні назви.
+
+Порядок виводу гарантувати не можна: після `fork()` parent і child це окремі процеси, їх порядок визначає планувальник. У трьох запусках parent друкував першим, але це не гарантія.
+
+### 7. Незалежна пам'ять (fork_memory.c)
+
+```
+Before fork: value=100, address=0x5eea93e9a010
+PARENT: PID=21203 value=300 address=0x5eea93e9a010
+CHILD:  PID=21204 value=200 address=0x5eea93e9a010
+```
+
+Child не побачив `300`: після `fork` у процесів окремі адресні простори. Адреса однакова, а значення різні. Однакова віртуальна адреса у двох процесів не означає спільну змінювану пам'ять.
+
+### 8. strace для fork
+
+```
+clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD, ...) = 21256
+```
+
+Створення child видно як `clone` з поверненим PID 21256; завершення процесів як `exit_group(0)` і `+++ exited with 0 +++`.
+
+### 9. wait (wait_basic.c)
+
+```
+PARENT: waiting for child 21296
+CHILD: working...
+CHILD: finished
+PARENT: child finished
+PARENT: child exit status = 42
+```
+
+Під час `wait()` parent заблокований і чекає завершення child, тому `child finished` не з'являється раніше. `42` це код завершення child (`return 42`), а не PID. `WIFEXITED` перевіряє, що child завершився нормально, `WEXITSTATUS` витягує з `status` сам код.
+
+### 10. exec (exec_basic.c, exec_pid.c)
+
+```
+Before exec: PID=22067
+New program PID=22067
+```
+
+PID до exec = 22067, після exec = 22067. Рядок `perror("execlp")` не виконався: успішний `exec` замінює програму в процесі. Новий процес: ні. Нова програма: так. Той самий PID: так.
+
+### 11. fork + exec + wait (fork_exec.c)
+
+```
+PARENT: PID=22078
+PARENT: created child PID=22079
+CHILD before exec: PID=22079
+Program started by child
+PARENT: child completed
+```
+
+```
+        Parent
+          │
+        fork()
+     ┌────┴────┐
+   Parent    Child
+     │         │
+     │       exec()
+     │         │
+   wait()     echo
+     │         │
+     │        exit
+     ◄─────────┘
+  continue
+```
+
+- `fork()` створює child, копію parent.
+- `exec()` замінює програму в child на `echo`.
+- `wait()` блокує parent, доки child не завершиться, і забирає його статус.
+
+### 12. launcher.c
+
+`./launcher date`, `whoami`, `uname` запустили програми в child і вивели `Child exit status: 0` (PID дітей 22091, 22093, 22095). Це фрагмент роботи shell: прочитати назву, `fork`, `exec` у child, `wait` у parent.
+
+### 13. Стани процесу (states.c)
+
+`ps`: `S`, `/proc/PID/status`: `State: S (sleeping)`. Під час `sleep()` процес не використовує CPU, він у стані очікування (waiting/sleeping). ОС не витрачає на нього CPU, бо він лише чекає таймер, а процесорний час віддається іншим процесам.
+
+### 14. Zombie (zombie.c, zombie_wait.c)
+
+```
+22203   22201 Z [zombie] <defunct>
+```
+
+Child завершився, а parent спить і не викликав `wait()`, тому запис про child лишився в стані `Z`. Zombie не виконує інструкцій і не використовує CPU, це лише запис про завершення, який чекає, поки parent забере статус.
+
+Варіант з `wait()` (`zombie_wait.c`):
+
+```
+до wait():
+  24355   24353 Z [zombie_wait] <defunct>
+PARENT: wait() done
+після wait():
+  (child відсутній у списку)
+```
+
+Після `wait()` запис зник: parent забрав статус, і процес остаточно прибраний.
+
+### 15. Кількість процесів (fork2.c, fork3.c, fork_tree.c)
+
+
+`fork2`: `printf` виконано 4 рази, після двох `fork()` існує 2² = 4 процеси. `fork3` (три `fork()`): `wc -l` дав 8, тобто 2³ = 8 процесів. n послідовних `fork()` у всіх процесах дають 2ⁿ процесів.
+
+Дерево з `fork_tree` (PID з `getpid()`, PPID з `getppid()`):
+
+```
+PID=24538 PPID=9811
+PID=24540 PPID=1
+PID=24541 PPID=24538
+PID=24542 PPID=24540
+```
+
+```
+24538 (початковий, parent = shell 9811)
+├── 24540 (child 1-го fork)
+│   └── 24542 (child 2-го fork у 24540)
+└── 24541 (child 2-го fork у 24538)
+```
+
+PID 24539 пропущено, його зайняла інша команда конвеєра. У 24540 `PPID=1`: початковий процес 24538 завершився раніше, і дитину усиновив процес 1.
+
+### 16. process_runner.c
+
+```
+Parent PID: 22491
+Creating child...
+Child PID: 22492
+Child PPID: 22491
+Executing: date
+
+Child 22492 completed
+Exit status: 0
+Parent continues
+```
+
+Для неіснуючої програми: `execlp: No such file or directory`, child завершився зі статусом 1, parent це зафіксував і продовжив. Фрагменти `strace -f -e trace=process`:
+
+```
+clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD, ...) = 22530
+[pid 22530] execve("/usr/bin/date", ["date"], ...) = 0
+<... wait4 resumed>[{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 22530
+```
+
+- Створення процесу: `clone` (це `fork()`).
+- Запуск нової програми: `execve("/usr/bin/date")`; перед цим `execve` перебирає каталоги з `PATH` (попередні спроби дали `ENOENT`).
+- Очікування та завершення: `wait4` (це `waitpid`) повернувся з PID 22530 і статусом `WIFEXITED`, `WEXITSTATUS == 0`.
+
+### Відповіді на контрольні питання
+
+1. Program це файл з кодом на диску, process це запущений екземпляр у пам'яті зі станом і PID.
+2. PID це унікальний номер процесу в ОС.
+3. PPID це PID батьківського процесу.
+4. Бо кожен запуск створює окремий процес зі своїм PID (три екземпляри `process_info`).
+5. `/proc/PID` це інтерфейс ядра для перегляду стану процесу (ім'я, стан, exe, maps).
+6. System call це запит програми до ядра ОС на виконання привілейованої дії (`write`, `clone`, `execve`).
+7. Function call виконується в коді програми чи бібліотеки, system call передає керування ядру. `printf` це функція, `write` це системний виклик.
+8. `strace` показує системні виклики, які виконує програма.
+9. `fork()` створює копію поточного процесу (child).
+10. Після одного успішного `fork()` існує 2 процеси.
+11. Так child відрізняє себе від parent: `0` у child, PID дитини у parent.
+12. Parent отримує PID child.
+13. Ні, у кожного своя копія `value` (parent 300, child 200).
+14. Бо адресні простори окремі: та сама віртуальна адреса в різних процесах відповідає різній пам'яті.
+15. `exec()` замінює програму, яку виконує процес, новою.
+16. Ні, процес той самий, змінюється лише програма.
+17. PID не змінюється.
+18. `wait()` змушує parent чекати завершення child і забрати його статус.
+19. Exit status це код, з яким завершився процес (у `wait_basic` 42, у `date` 0).
+20. Zombie це завершений процес, статус якого parent ще не забрав через `wait()`.
+21. Ні, zombie лише запис про завершення і не виконує інструкцій.
+22. Ready: процес готовий до виконання й чекає CPU. Running: виконується на CPU. Waiting: чекає події (наприклад, таймер при `sleep`).
+23. Після `fork()` це окремі процеси, їх порядок визначає планувальник.
+24. Shell робить `fork`, у child `exec` для запуску команди, а в parent `wait` для очікування (як у `launcher` і `process_runner`).
+
+### Висновок
+
+Я дослідив життєвий цикл процесу. Program це файл, process це його запущений екземпляр зі своїм PID. `fork()` створює child з окремим адресним простором (однакова адреса `&value`, різні значення), `exec()` замінює програму в процесі зі збереженням PID, `wait()` синхронізує parent з child і повертає exit status. Без `wait()` завершений child лишається zombie. Модель `fork → exec → wait` лежить в основі роботи shell, а `strace` показав, що на рівні ядра `fork()` це `clone`, `exec` це `execve`, `wait` це `wait4`.
