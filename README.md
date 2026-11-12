@@ -8,7 +8,7 @@
 
 - Lab 1: [Представлення даних у пам'яті комп'ютера](#lab-1) (`labs/lab01-data-representation`)
 - Lab 2: [Від C до Assembly та машинного коду](#lab-2) (`labs/lab02-assembly`)
-- Lab 3: Побудова програми, ELF та організація пам'яті (`labs/lab03-build-elf-memory`), буде додано
+- Lab 3: [Побудова програми, ELF та організація пам'яті](#lab-3) (`labs/lab03-build-elf-memory`)
 - Lab 4: Процеси, системні виклики та fork/exec/wait (`labs/lab04-processes`), буде додано
 - Lab 5: Потоки, race conditions та mutex (`labs/lab05-threads`), буде додано
 - Lab 6: Віртуальна пам'ять, file descriptors та I/O (`labs/lab06-memory-io`), буде додано
