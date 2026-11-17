@@ -11,8 +11,8 @@
 - Lab 3: [Побудова програми, ELF та організація пам'яті](#lab-3) (`labs/lab03-build-elf-memory`)
 - Lab 4: [Процеси, системні виклики та fork/exec/wait](#lab-4) (`labs/lab04-processes`)
 - Lab 5: [Потоки, race conditions та mutex](#lab-5) (`labs/lab05-threads`)
-- Lab 6: Віртуальна пам'ять, file descriptors та I/O (`labs/lab06-memory-io`), буде додано
-- Lab 7: Pipes, redirection, signals та mini-shell (`labs/lab07-ipc-shell`), буде додано
+- Lab 6: [Віртуальна пам'ять, file descriptors та I/O](#lab-6) (`labs/lab06-memory-io`)
+- Lab 7: [Pipes, redirection, signals та mini-shell](#lab-7) (`labs/lab07-ipc-shell`)
 
 ---
 
@@ -20,7 +20,7 @@
 
 **Представлення даних у пам'яті комп'ютера.** Код: `labs/lab01-data-representation/`.
 
-### 1. Прогнози (записані до запуску)
+### 1. Прогнози
 
 - Розміри типів: char 1, short 2, int 4, long 8, long long 8, float 4, double 8, void * 8
 - Бітове представлення -1 у int8_t: 11111111
@@ -1127,7 +1127,7 @@ Threads одного процесу ділять код, дані й купу, �
 
 ### 1. Адреси об'єктів (memory_layout.c)
 
-Прогноз (мій, до запуску): адреси будуть різні між запусками. Підтвердився.
+Прогноз: адреси будуть різні між запусками. Підтвердився.
 
 | Об'єкт | Run 1 | Run 2 | Run 3 |
 |---|---|---|---|
@@ -1175,7 +1175,7 @@ stack:  0x7ffec8a3d9fc
 
 ### 4. malloc і фізична пам'ять (heap_growth.c)
 
-Прогноз (мій, до запуску): `так` (без уточнення, до якої частини питання він стосувався). Фактично:
+Прогноз: `так` (без уточнення, до якої частини питання він стосувався). Фактично:
 
 | Момент | VmSize | VmRSS |
 |---|---|---|
@@ -1186,7 +1186,7 @@ stack:  0x7ffec8a3d9fc
 
 ### 5. Некоректний доступ (invalid_memory.c)
 
-Прогноз (мій, до запуску): буде повідомлення і програма завершиться. Підтвердився.
+Прогноз: буде повідомлення і програма завершиться. Підтвердився.
 
 ```
 About to access invalid memory
@@ -1238,7 +1238,7 @@ Hello from write()
 
 ### 10. File offset і lseek (file_offset.c)
 
-Прогноз (мій, до запуску): другий `read()` прочитає ті самі перші байти. **Не підтвердився.**
+Прогноз: другий `read()` прочитає ті самі перші байти. **Не підтвердився.**
 
 ```
 First:  [Compu]
@@ -1281,7 +1281,7 @@ close(3)                                = 0
 
 ### 13. Буферизація (buffering.c)
 
-Прогноз (мій, до запуску): `DABC`. Підтвердився.
+Прогноз: `DABC`. Підтвердився.
 
 ```
 ./buffering         → DABC
@@ -1386,3 +1386,197 @@ DESTINATION FILE
 ### Висновок
 
 Адреси в програмі це віртуальні: у кожному запуску вони різні (ASLR), а права доступу в `/proc/PID/maps` захищають код і дані. `malloc` лише резервує віртуальний простір, фізична пам'ять з'являється при зверненні (VmRSS 1708 kB → 104104 kB), а некоректний доступ завершується SIGSEGV. Файли й термінал доступні через дескриптори 0, 1, 2 та номери, що повертає `open()`, а `read`/`write` працюють із поточним зсувом. Перенаправлення змінює об'єкт, на який вказує дескриптор, без зміни коду, а буферизація stdio може змінювати порядок реального виводу. `file_copy` поєднує всі ці теми: байти проходять із файлу через ядро в буфер процесу й назад у файл.
+
+---
+
+## Lab 7
+
+**Pipes, redirection, signals та mini-shell.** Код: `labs/lab07-ipc-shell/`. Середовище: Codespaces, Ubuntu 24.04, GCC 13.3, x86-64.
+
+### 1. Pipe (pipe_basic.c)
+
+```
+Read end:  3
+Write end: 4
+Received: Hello through pipe!
+```
+
+`pipe()` створює канал у ядрі й повертає два дескриптори: `pipefd[0]` це кінець для читання, `pipefd[1]` це кінець для запису. Pipe не є звичайним файлом на диску, але працює через `read()` і `write()`, бо це теж файловий дескриптор. Два дескриптори потрібні, бо дані течуть в одному напрямку: один кінець пише, інший читає.
+
+### 2. Pipe між процесами (pipe_processes.c)
+
+Child прочитав `Message from parent`. Після `fork()` обидва процеси мають обидва кінці pipe. Тому parent закриває read end, а child закриває write end.
+
+```
+Parent:  fd 3 (read) закрито,  fd 4 (write) → пише
+Child:   fd 4 (write) закрито, fd 3 (read)  → читає
+```
+
+### 3. Незакритий кінець і EOF (pipe_no_close.c)
+
+Прогноз: програма зависне. Підтвердився.
+
+```
+баг (write end не закрито в child): Child got 5 bytes → timeout, exit code 124
+виправлено (-DFIXED):               Child got 5 bytes / Child: EOF reached / exit code 0
+```
+
+У версії з багом child після прочитаних 5 байтів чекає наступний `read()` вічно: pipe порожній, але write end ще відкритий (у самому child), тож EOF не настає. Порожній pipe не дорівнює EOF. EOF (`read` повертає 0) настає лише коли pipe порожній і всі write end закриті.
+
+### 4. strace для pipe
+
+```
+pipe2([3, 4], 0)                = 0
+clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD, ...) = 2335
+close(3)                                  (parent)
+write(4, "Message from parent\n", 20) = 20
+close(4)                                  (parent)
+close(4)                                  (child)
+read(3, "Message from parent\n", 127) = 20
+close(3)                                  (child)
+wait4(1188, ...) = 1188
+```
+
+`pipe2` створює канал (`pipe()` у glibc), `clone` створює child (`fork()`), далі видно `close`, `write`, `read` і `wait4`.
+
+### 5. dup2 (dup2_output.c)
+
+`cat redirected.txt` → `This goes to the file`. До `dup2`: `fd 1 → термінал`, `fd 3 → redirected.txt`. Після `dup2(fd, 1)` обидва дескриптори вказують на файл, після `close(fd)` лишається `fd 1 → redirected.txt`. `printf` не змінювався, змінився об'єкт, на який вказує stdout.
+
+### 6. exec + redirection (redirect_exec.c)
+
+Child відкриває `ls-output.txt`, робить `dup2(fd, 1)`, закриває `fd` і виконує `ls -l` через `execvp`. Вивід `ls -l` опинився у файлі, а parent після `waitpid` надрукував `Parent: ls finished, output in ls-output.txt`. Рядок `perror("execvp")` виконується лише якщо `execvp` не вдався.
+
+### 7. Pipeline `ls -l | wc -l` (pipeline.c)
+
+```
+./pipeline          → 16
+ls -l | wc -l       → 16
+```
+
+Результат збігається з bash.
+
+```
+До dup2:                    Після налаштування:         Після exec:
+
+Child 1: 0 term, 1 term,    Child 1: 1 → pipe write     ls stdout ─► PIPE ─► wc stdin
+         3 pipe r, 4 pipe w
+Child 2: 0 term, 1 term,    Child 2: 0 → pipe read
+         3 pipe r, 4 pipe w
+```
+
+Child 1 робить `dup2(pipefd[1], 1)`, child 2 робить `dup2(pipefd[0], 0)`, обидва закривають оригінальні дескриптори pipe. Parent теж закриває обидва, бо інакше `wc` не отримав би EOF і завис би.
+
+### 8. Сигнали (signal_int.c, signal_parent_child.c)
+
+Прогноз: child буде вбитий сигналом. Підтвердився.
+
+| Експеримент | Результат |
+|---|---|
+| SIGTERM, поведінка за замовчуванням | `PARENT: child killed by signal 15` |
+| SIGTERM з власним handler | `CHILD: SIGTERM caught, exiting normally`, `child exited with status 7` |
+| SIGINT на `signal_int` | `SIGINT received`, процес живий |
+| SIGTERM на `signal_int` | exit code 143 (128 + 15) |
+| SIGKILL на `signal_int` | exit code 137 (128 + 9) |
+
+`kill(pid, SIGTERM)` лише надсилає сигнал, а реакція залежить від його обробки: за замовчуванням процес завершується, з handler він може відреагувати й завершитись сам. SIGINT це переривання з клавіатури (Ctrl+C), SIGTERM це «ввічливе» прохання завершитись, яке можна перехопити, SIGKILL завершує процес примусово. Прогноз: handler для SIGKILL встановити не можна. Експеримент показав, що SIGKILL вбиває процес попри handler на SIGINT, але саму спробу `sigaction(SIGKILL)` я не запускав: за теорією вона повертає помилку, бо ядро має завжди мати спосіб зупинити процес.
+
+### 9. Архітектура mini-shell
+
+```
+Цикл: вивести "myshell> " → fgets → розбити на токени (strtok)
+  ├── exit              → вийти з циклу
+  ├── cd                → chdir() у самому shell
+  ├── команда [> файл]  → fork → child: SIGINT default, [open+dup2], execvp; parent: waitpid
+  └── cmd1 | cmd2       → pipe → fork child 1 (stdout → pipe), fork child 2 (stdin ← pipe);
+                          parent закриває обидва кінці й чекає обох
+```
+
+Shell ігнорує SIGINT (`SIG_IGN`), а child перед `exec` повертає `SIG_DFL`. Підтримуються одна перенаправлення `>` і одна pipe між двома командами. `system()` не використовується. Розбір рядка простий: без лапок, змінних і `;`/`&&`.
+
+`cd` має бути built-in: `chdir` змінює робочий каталог лише процесу, який його викликав. Якби shell виконував `cd` у child, змінився б каталог child, який одразу завершується, а parent лишився б у старому каталозі. Те саме з `exit`: завершитись має сам shell, а не child.
+
+### 10. Тести mini-shell
+
+Прогноз: `cd /tmp` не змінить каталог shell. **Не підтвердився.**
+
+Вхід `pwd`, `echo Hello Systems`, `cd /tmp`, `pwd`, `echo test > test.txt`, `cat test.txt`, `ls -l | wc -l`, `no_such_command`, `echo after-error`, `exit`:
+
+```
+/workspaces/computer-systems-course/labs/lab07-ipc-shell
+Hello Systems
+/tmp
+test
+8
+execvp: No such file or directory
+after-error
+```
+
+(Приглашення `myshell>` в потоці склеїлись, бо вхід подавався через pipe, а не з клавіатури.) Другий `pwd` показав `/tmp`: `cd` виконався в самому shell. `ls -l | wc -l` дав 8, у bash для `/tmp` теж 8. Неіснуюча команда не завершила shell.
+
+Test Ctrl+C. Прогноз: shell лишиться живим. Підтвердився. У `myshell` запущено `sleep 30`, процесу `sleep` надіслано `kill -INT`; після цього shell вивів `myshell>` і виконав `echo still-running` → `still-running`. Обмеження: SIGINT надсилався дочірньому `sleep` напряму, а не Ctrl+C у терміналі (який шле сигнал усій групі процесів), і не самому shell. Тож ігнорування SIGINT самим shell окремо не перевірялось.
+
+### 11. strace mini-shell
+
+Вивід обрізано `head -n 24`, повністю видно першу команду:
+
+```
+clone(...)                        (fork для echo)
+openat(AT_FDCWD, "output.txt", O_WRONLY|O_CREAT|O_TRUNC, 0644) = 3
+dup2(3, 1)                        = 1
+execve("/usr/bin/echo", ["echo", "hello"], ...) = 0
+wait4(4005, ...)                  = 4005
+```
+
+Перед успішним `execve("/usr/bin/echo")` було кілька невдалих спроб з `ENOENT` (перебір каталогів з `PATH`). Для `ls | wc -l`:
+
+```
+pipe2([3, 4], 0)                  = 0
+clone(...) = 4006 ; clone(...) = 4007
+[pid 4006] dup2(4, 1)             = 1     (child 1: stdout → pipe)
+[pid 4007] dup2(3, 0)             = 0     (child 2: stdin ← pipe)
+```
+
+Відповідність: `clone` це `fork`, `openat` + `dup2` це `>`, `pipe2` + два `dup2` це конвеєр, `execve` це `execvp`, `wait4` це `waitpid`. Закриття дескрипторів і `wait4` для конвеєра в обрізаному виводі не видно.
+
+### Відповіді на контрольні питання
+
+1. IPC (inter-process communication) це механізми обміну даними між процесами (pipe, сигнали та ін.).
+2. `pipe()` створює канал у ядрі й повертає два дескриптори.
+3. `pipefd[0]` це кінець для читання.
+4. `pipefd[1]` це кінець для запису.
+5. Бо pipe представлений файловими дескрипторами.
+6. Child отримує копії всіх відкритих дескрипторів parent, зокрема обох кінців pipe.
+7. Щоб не тримати зайвих кінців відкритими: інакше не настане EOF, і зайві дескриптори витікають.
+8. Коли pipe порожній і всі write end закриті (`pipe_no_close`).
+9. Reader не отримає EOF і зависне (так було в експерименті).
+10. `dup2(old, new)` робить так, що `new` вказує на той самий ресурс, що й `old`.
+11. Відкрити файл, `dup2(fd, 1)`, закрити `fd`, потім `exec`.
+12. Бо вона пише в `fd 1`, а shell змінює лише те, на що цей дескриптор вказує.
+13. `pipe`, два `fork`, у першому stdout до pipe, у другому stdin з pipe, потім `exec` обох.
+14. Дескриптор 1 (stdout).
+15. Дескриптор 0 (stdin).
+16. Signal це асинхронне повідомлення процесу від ядра чи іншого процесу.
+17. Pipe передає потік даних, signal лише сповіщає про подію без даних.
+18. `kill()` надсилає сигнал процесу (не обов'язково вбиває його).
+19. SIGTERM можна перехопити або проігнорувати, SIGKILL ні.
+20. Бо ядро має завжди мати спосіб зупинити процес. З теорії, `sigaction(SIGKILL)` не запускалась.
+21. SIGINT це сигнал переривання, який надсилає Ctrl+C.
+22. `printf` не є безпечною для виклику з handler (буфер, блокування).
+23. Функція, яку можна безпечно викликати з handler (наприклад, `write`).
+24. Бо shell це звичайна програма, яка запускає інші через системні виклики (`fork`, `exec`, `wait`).
+25. `fork()` створює child, у якому буде запущена команда.
+26. `exec()` замінює програму в процесі новою.
+27. `waitpid()` чекає завершення конкретного child і забирає його статус.
+28. Бо `chdir` змінює каталог лише того процесу, що його викликав.
+29. Бо завершитись має сам shell, а не child.
+30. `system()` віддає всю роботу іншому shell і ховає механізми, які вивчаються.
+31. Відкриті дескриптори зазвичай зберігаються після `exec` (на цьому і тримається redirection); закриваються лише ті, що мають прапорець close-on-exec. З теорії.
+32. `pipe` створює канал, `fork` створює два процеси, `dup2` підключає їхні stdout та stdin до кінців pipe, `exec` запускає програми.
+33. Бо це окремі процеси: планувальник виконує їх незалежно, а блокуються вони лише на читанні з порожнього pipe чи записі в повний.
+34. Writer отримує SIGPIPE (або помилку EPIPE з `write`). З теорії, не перевірялось.
+35. Обидва кінці pipe (`close(pipefd[0])`, `close(pipefd[1])`).
+
+### Висновок
+
+Pipe, `dup2` і сигнали складаються з тих самих основ: процесів (`fork`/`exec`/`wait`) і файлових дескрипторів. EOF в pipe потребує закриття всіх write end (`pipe_no_close` зависла без цього). Redirection і pipeline це лише підміна того, на що вказують дескриптори 0 і 1 до `exec`, а програма цього не знає. Сигнали дозволяють перервати процес, але SIGKILL не перехоплюється. У mini-shell це зведено разом: `cd` і `exit` виконує сам shell, зовнішні команди йдуть через `fork`/`execvp`/`waitpid`, `>` через `open`+`dup2`, а `cmd1 | cmd2` через `pipe` і два child. Shell ігнорує SIGINT, а child повертає його поведінку за замовчуванням.
